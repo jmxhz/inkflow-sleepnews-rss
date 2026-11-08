@@ -1,0 +1,37 @@
+name: Verify private SleepNews fulltext (cloud)
+
+on:
+  schedule:
+    - cron: "23 12 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sleepnews-verify-private-fulltext
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Validate complete original articles and private EPUB
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout public link-only feed and verifier
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install EPUB and article parser dependencies
+        run: pip install -r requirements.txt
+      - name: Fetch verified full articles and validate private EPUB
+        env:
+          PYTHONUTF8: "1"
+        run: python private_fulltext.py --sample 2 --strict
+      # No artifact upload: the copyrighted original article body and book
+      # are held in a temporary directory, never public GitHub Pages.
