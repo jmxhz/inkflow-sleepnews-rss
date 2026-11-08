@@ -48,8 +48,12 @@ def load_feed(path=FEED,limit=3):
     for item in root.findall("./channel/item"):
         title=item.findtext("title","")
         link=item.findtext("link","")
-        if item.find(ENCODED) is not None or item.find("description") is not None:
-            raise ValueError("正式 RSS 意外包含可能被误认成全文的内容")
+        embedded=item.findtext(ENCODED)
+        description=item.findtext("description")
+        if embedded is not None or description is not None:
+            if (not embedded or not description or embedded!=description or
+                len(BeautifulSoup(embedded,"lxml").get_text(" ",strip=True))<800):
+                raise ValueError("正式 RSS 包含不完整或不一致的正文")
         parts=urlsplit(link)
         if parts.scheme!="https" or parts.hostname!="mp.weixin.qq.com" or parts.path not in ("/s",) and not parts.path.startswith("/s/"):
             continue

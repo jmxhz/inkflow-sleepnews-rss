@@ -3,10 +3,9 @@
 
 Reads only public: jintiankansha.me headlines, Sogou WeChat search, and
 the ORIGINAL WeChat article page with exact verified public-account biz.
-Does not use WeRead login or any private credentials. Publishes title,
-timestamp and verified ORIGINAL publisher links only. The reader is expected
-to retrieve full article text from the publisher URL. No copyrighted article
-body or misleading partial content:encoded fields are published.
+Does not use WeRead login or any private credentials. Adds verified article
+identities and stable URLs; the scheduled post-update hydration step must
+supply the full original body before the feed is committed.
 
 Run in public jmxhz/inkflow-sleepnews-rss GitHub Actions environment.
 """
@@ -21,6 +20,7 @@ from pathlib import Path
 import sys
 import xml.etree.ElementTree as ET
 
+from bs4 import BeautifulSoup
 import sleepnews_history as hist
 
 ROOT=Path(__file__).resolve().parent
@@ -80,25 +80,30 @@ def append_verified(channel,item):
     ET.SubElement(node,"pubDate").text=dt.datetime.combine(
         day,dt.time(12,0),tzinfo=CST).strftime("%a, %d %b %Y %H:%M:%S %z")
     ET.SubElement(node,"{"+DC+"}creator").text=ACCOUNT
-    # Do NOT publish a 240-char snippet pretending to be the full article.
-    # WhereMyLife can only get full text by following the verified link.
-    # The publisher retains control over the original article content.
+    # The mandatory hydration step adds full content:encoded + description.
+    # Never write a misleading 240-character excerpt into these fields.
 
 def remove_truncated_entries(channel):
-    """Upgrade existing RSS items to link-only without changing their GUIDs.
+    """Remove only invalid or truncated body fields, retain verified fulltext.
 
-    Previously every item had a 240-char description and content:encoded,
-    which an RSS->Kindle reader could mistake for complete article content.
+    A previously published long article must not be deleted during the next
+    scheduled run. Any invalid or partial body will be re-fetched by the
+    mandatory hydrate_rss.py step before publication.
     """
     changed=0
     for item in channel.findall("item"):
-        removed=False
+        content=item.findtext("{"+CONTENT+"}encoded")
+        description=item.findtext("description")
+        if content is None and description is None:
+            continue
+        if (content and description and content==description and
+            len(BeautifulSoup(content,"lxml").get_text(" ",strip=True))>=800 and
+            not any(x in content for x in ("文章原址","打开公众号原文","按标题检索"))):
+            continue
         for child in list(item):
             if child.tag in ("description","{"+CONTENT+"}encoded"):
                 item.remove(child)
-                removed=True
-        if removed:
-            changed+=1
+        changed+=1
     return changed
 
 

@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   update:
-    name: Discover and publish verified daily-news links
+    name: Discover and publish verified fulltext RSS articles
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -33,7 +33,11 @@ jobs:
         env:
           PYTHONUTF8: "1"
         run: python cloud_update.py --days 30 --attempts 3
-      - name: Validate RSS and commit changed public summary files
+      - name: Fetch and embed complete original article text and images
+        env:
+          PYTHONUTF8: "1"
+        run: python hydrate_rss.py --feed feed.xml
+      - name: Validate RSS and commit full articles
         shell: bash
         run: |
           python - <<'PY'
@@ -55,8 +59,16 @@ jobs:
               assert link.startswith('https://mp.weixin.qq.com/s')
               assert uid not in guids, 'Duplicate RSS guid'
               assert title not in titles, 'Duplicate daily headline'
-              assert item.find('{http://purl.org/rss/1.0/modules/content/}encoded') is None
-              assert item.find('description') is None
+              body=item.findtext('{http://purl.org/rss/1.0/modules/content/}encoded','')
+              description=item.findtext('description','')
+              from bs4 import BeautifulSoup
+              assert body and description and body==description, (
+                  'Each article must include identical complete HTML body in both RSS fields')
+              assert len(BeautifulSoup(body,'lxml').get_text(' ',strip=True))>=800, (
+                  'No truncated or link-only articles may be published')
+              assert not any(label in body for label in (
+                  '文章原址','打开公众号原文','按标题检索')), (
+                  'No automatically appended original article footer')
               guids.add(uid)
               titles.add(title)
               links[uid]=link
@@ -69,7 +81,7 @@ jobs:
                   assert links[uid]==old.findtext('link',''), (
                       'Refusing to change a previously published article URL: '
                       'WhereMyLife treats URL changes as additional articles')
-          print(f'Validated {len(items)} entries; published article URLs immutable')
+          print(f'Validated {len(items)} FULLTEXT entries; published article URLs immutable')
           PY
           git add -- feed.xml
           if [ -f retry-state.json ]; then git add -- retry-state.json; fi
@@ -79,6 +91,6 @@ jobs:
           else
             git -c user.name="github-actions[bot]" \
                 -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-                commit -m "Auto refresh SleepNews public RSS index"
+                commit -m "Auto refresh verified SleepNews fulltext RSS"
             git push origin HEAD:main
           fi
