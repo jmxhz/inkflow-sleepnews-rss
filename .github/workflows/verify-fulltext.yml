@@ -43,5 +43,30 @@ jobs:
         env:
           PYTHONUTF8: "1"
         run: python private_fulltext.py --sample "${{ inputs.sample || '2' }}" --strict
-      # No artifact upload: the copyrighted original article body and book
-      # are held in a temporary directory, never public GitHub Pages.
+      - name: Validate private WhereMyLife-compatible fulltext RSS (not published)
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          python fulltext_private.py --limit "${{ inputs.sample || '2' }}" --output "$RUNNER_TEMP/sleepnews-fulltext-private.xml"
+          python - <<'PY'
+          import os, xml.etree.ElementTree as ET
+          from bs4 import BeautifulSoup
+          path=os.path.join(os.environ['RUNNER_TEMP'],'sleepnews-fulltext-private.xml')
+          root=ET.parse(path).getroot()
+          items=root.findall('./channel/item')
+          assert len(items)>=1
+          guids=set()
+          for item in items:
+              guid=item.findtext('guid','')
+              body=item.findtext('{http://purl.org/rss/1.0/modules/content/}encoded','')
+              desc=item.findtext('description','')
+              assert guid not in guids and guid.startswith('urn:inkflow:sleepnews:')
+              guids.add(guid)
+              assert body==desc
+              assert len(BeautifulSoup(body,'lxml').get_text(' ',strip=True))>=800
+              assert '文章原址' not in body and '打开公众号原文' not in body
+          print('Private fulltext RSS validation: passed; articles:',len(items))
+          PY
+          rm -f "$RUNNER_TEMP/sleepnews-fulltext-private.xml"
+      # No artifact upload: copyrighted original article bodies and generated
+      # books stay only in temporary files, never public GitHub Pages.
