@@ -33,10 +33,6 @@ jobs:
         env:
           PYTHONUTF8: "1"
         run: python cloud_update.py --days 30 --attempts 3
-      - name: Recover durable publisher-linked article URLs
-        env:
-          PYTHONUTF8: "1"
-        run: python recover_links.py --max-sources 12
       - name: Validate RSS and commit changed public summary files
         shell: bash
         run: |
@@ -48,12 +44,32 @@ jobs:
           assert root.findtext('./channel/title')=='睡前消息编辑部 · 每日新闻'
           items=root.findall('./channel/item')
           assert 1<=len(items)<=90
+          guids=set()
+          titles=set()
+          links={}
           for item in items:
-              assert item.findtext('guid','').startswith('urn:inkflow:sleepnews:MP_WXS_3581557283_')
-              assert item.findtext('link','').startswith('https://mp.weixin.qq.com/s')
+              uid=item.findtext('guid','')
+              title=item.findtext('title','')
+              link=item.findtext('link','')
+              assert uid.startswith('urn:inkflow:sleepnews:MP_WXS_3581557283_')
+              assert link.startswith('https://mp.weixin.qq.com/s')
+              assert uid not in guids, 'Duplicate RSS guid'
+              assert title not in titles, 'Duplicate daily headline'
               assert item.find('{http://purl.org/rss/1.0/modules/content/}encoded') is None
               assert item.find('description') is None
-          print(f'Validated {len(items)} public RSS entries')
+              guids.add(uid)
+              titles.add(title)
+              links[uid]=link
+          import subprocess
+          original=subprocess.check_output(['git','show','HEAD:feed.xml'])
+          oldroot=ET.fromstring(original)
+          for old in oldroot.findall('./channel/item'):
+              uid=old.findtext('guid','')
+              if uid in links:
+                  assert links[uid]==old.findtext('link',''), (
+                      'Refusing to change a previously published article URL: '
+                      'WhereMyLife treats URL changes as additional articles')
+          print(f'Validated {len(items)} entries; published article URLs immutable')
           PY
           git add -- feed.xml
           if [ -f retry-state.json ]; then git add -- retry-state.json; fi
