@@ -33,6 +33,10 @@ jobs:
         env:
           PYTHONUTF8: "1"
         run: python cloud_update.py --days 30 --attempts 3
+      - name: Recover durable publisher-linked article URLs
+        env:
+          PYTHONUTF8: "1"
+        run: python recover_links.py --max-sources 12
       - name: Validate RSS and commit changed public summary files
         shell: bash
         run: |
@@ -53,6 +57,7 @@ jobs:
           PY
           git add -- feed.xml
           if [ -f retry-state.json ]; then git add -- retry-state.json; fi
+          if [ -f link-recovery-state.json ]; then git add -- link-recovery-state.json; fi
           if git diff --cached --quiet; then
             echo "Nothing new; keeping existing public feed"
           else
