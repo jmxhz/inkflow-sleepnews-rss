@@ -33,6 +33,8 @@ jobs:
         env:
           PYTHONUTF8: "1"
         run: python cloud_update.py --days 30 --attempts 3
+      - name: Prepare original publisher link test feed
+        run: python origin_reader_test.py
       - name: Validate RSS and commit changed public summary files
         shell: bash
         run: |
@@ -51,7 +53,7 @@ jobs:
               assert 20<=len(content)<=1000
           print(f'Validated {len(items)} public RSS entries')
           PY
-          git add -- feed.xml
+          git add -- feed.xml origin-reader-test.xml
           if [ -f retry-state.json ]; then git add -- retry-state.json; fi
           if git diff --cached --quiet; then
             echo "Nothing new; keeping existing public feed"
