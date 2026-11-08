@@ -3,8 +3,10 @@
 
 Reads only public: jintiankansha.me headlines, Sogou WeChat search, and
 the ORIGINAL WeChat article page with exact verified public-account biz.
-Does not use WeRead login or any private credentials. Publishes ~240-character
-excerpts and publisher links, never full copyrighted article content.
+Does not use WeRead login or any private credentials. Publishes title,
+timestamp and verified ORIGINAL publisher links only. The reader is expected
+to retrieve full article text from the publisher URL. No copyrighted article
+body or misleading partial content:encoded fields are published.
 
 Run in public jmxhz/inkflow-sleepnews-rss GitHub Actions environment.
 """
@@ -78,15 +80,27 @@ def append_verified(channel,item):
     ET.SubElement(node,"pubDate").text=dt.datetime.combine(
         day,dt.time(12,0),tzinfo=CST).strftime("%a, %d %b %Y %H:%M:%S %z")
     ET.SubElement(node,"{"+DC+"}creator").text=ACCOUNT
-    ET.SubElement(node,"description").text=summary
-    temporary=item.get("linkKind")=="temporary_tencent"
-    label="打开微信原文（临时链接可能失效）" if temporary else "打开公众号原文"
-    body="<p>"+html.escape(summary)+"…</p><p><a href=\""+html.escape(original,quote=True)+"\">"+label+"</a></p>"
-    lookup=str(item.get("lookupUrl",""))
-    lookup_u=hist.urlsplit(lookup)
-    if temporary and lookup_u.scheme=="https" and lookup_u.hostname=="weixin.sogou.com":
-        body+="<p>若原文链接失效：<a href=\""+html.escape(lookup,quote=True)+"\">按标题检索</a></p>"
-    ET.SubElement(node,"{"+CONTENT+"}encoded").text=body
+    # Do NOT publish a 240-char snippet pretending to be the full article.
+    # WhereMyLife can only get full text by following the verified link.
+    # The publisher retains control over the original article content.
+
+def remove_truncated_entries(channel):
+    """Upgrade existing RSS items to link-only without changing their GUIDs.
+
+    Previously every item had a 240-char description and content:encoded,
+    which an RSS->Kindle reader could mistake for complete article content.
+    """
+    changed=0
+    for item in channel.findall("item"):
+        removed=False
+        for child in list(item):
+            if child.tag in ("description","{"+CONTENT+"}encoded"):
+                item.remove(child)
+                removed=True
+        if removed:
+            changed+=1
+    return changed
+
 
 def refresh(days=30, max_attempts=3, dry_run=False, s=None):
     if not FEED.exists():
@@ -95,6 +109,7 @@ def refresh(days=30, max_attempts=3, dry_run=False, s=None):
     root=tree.getroot()
     channel, items=entries(root)
     records=current_records(items)
+    upgraded=remove_truncated_entries(channel)
     candidates,stats=hist.fetch_backfill(
         records,days=days,max_attempts=max_attempts,
         progress_path=RETRY,s=s)
@@ -106,7 +121,7 @@ def refresh(days=30, max_attempts=3, dry_run=False, s=None):
         append_verified(channel,candidate)
         existing.add(key)
         count+=1
-    if count:
+    if count or upgraded:
         all_items=channel.findall("item")
         for node in all_items: channel.remove(node)
         # Sort entirely by article-day title so feed readers see newest first.
@@ -118,9 +133,10 @@ def refresh(days=30, max_attempts=3, dry_run=False, s=None):
         ET.ElementTree(root).write(tmp,encoding="utf-8",xml_declaration=True)
         tmp.replace(FEED)
     result={"ok":True,"existing":len(items),"added":count,
+            "upgraded_link_only":upgraded,
             "total":len(root.findall("./channel/item")),"history":stats,
             "no_private_account_credentials":True,
-            "upload_expected":count>0 or RETRY.is_file()}
+            "upload_expected":count>0 or upgraded>0 or RETRY.is_file()}
     print(json.dumps(result,ensure_ascii=False))
     if not stats["index"]:
         raise RuntimeError("Historical index returned no publisher articles; cloud refresh needs checking")
