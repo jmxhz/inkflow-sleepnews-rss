@@ -1,4 +1,4 @@
-name: Verify private SleepNews fulltext (cloud)
+name: Verify stored SleepNews RSS fulltext (cloud)
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       sample:
-        description: "How many currently indexed original articles to validate"
+        description: "Number of articles to re-fetch only when live recheck is selected"
         required: false
         default: "2"
         type: choice
@@ -14,59 +14,78 @@ on:
           - "2"
           - "5"
           - "13"
+      recheck_source:
+        description: "Also re-fetch originals for a private EPUB test (may hit WeChat captcha)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: sleepnews-verify-private-fulltext
+  group: sleepnews-verify-fulltext
   cancel-in-progress: false
 
 jobs:
   verify:
-    name: Validate complete original articles and private EPUB
+    name: Validate fulltext stored in public RSS
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
-      - name: Checkout public link-only feed and verifier
+      - name: Checkout verified public fulltext RSS
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Set up Python
+      - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install EPUB and article parser dependencies
+      - name: Install RSS parser dependencies
         run: pip install -r requirements.txt
-      - name: Fetch verified full articles and validate private EPUB
-        env:
-          PYTHONUTF8: "1"
-        run: python private_fulltext.py --sample "${{ inputs.sample || '2' }}" --strict
-      - name: Validate private WhereMyLife-compatible fulltext RSS (not published)
+      - name: Verify each stored article has the complete body
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          from bs4 import BeautifulSoup
+          root=ET.parse('feed.xml').getroot()
+          assert root.tag=='rss' and root.get('version')=='2.0'
+          assert root.findtext('./channel/title')=='睡前消息编辑部 · 每日新闻'
+          entries=root.findall('./channel/item')
+          assert 1<=len(entries)<=90
+          guids=set()
+          links=set()
+          chars=0
+          images=0
+          for item in entries:
+              guid=item.findtext('guid','')
+              title=item.findtext('title','')
+              link=item.findtext('link','')
+              body=item.findtext('{http://purl.org/rss/1.0/modules/content/}encoded','')
+              desc=item.findtext('description','')
+              assert guid.startswith('urn:inkflow:sleepnews:MP_WXS_3581557283_')
+              assert guid not in guids
+              assert title.startswith('睡前消息【20')
+              assert link.startswith('https://mp.weixin.qq.com/s')
+              assert body and desc==body
+              assert not any(x in body for x in ('文章原址','打开公众号原文','按标题检索'))
+              text=BeautifulSoup(body,'lxml').get_text(' ',strip=True)
+              assert len(text)>=800, title
+              chars+=len(text)
+              images+=body.count('<img ')
+              guids.add(guid)
+              links.add(link)
+          assert len(guids)==len(links)==len(entries)
+          print('STORED_FULLTEXT_VERIFIED',len(entries),'articles',chars,'chars',images,'images')
+          PY
+      - name: Optional publisher live fetch / private EPUB check
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.recheck_source }}
         env:
           PYTHONUTF8: "1"
         run: |
-          python fulltext_private.py --limit "${{ inputs.sample || '2' }}" --output "$RUNNER_TEMP/sleepnews-fulltext-private.xml"
-          python - <<'PY'
-          import os, xml.etree.ElementTree as ET
-          from bs4 import BeautifulSoup
-          path=os.path.join(os.environ['RUNNER_TEMP'],'sleepnews-fulltext-private.xml')
-          root=ET.parse(path).getroot()
-          items=root.findall('./channel/item')
-          assert len(items)>=1
-          guids=set()
-          for item in items:
-              guid=item.findtext('guid','')
-              body=item.findtext('{http://purl.org/rss/1.0/modules/content/}encoded','')
-              desc=item.findtext('description','')
-              assert guid not in guids and guid.startswith('urn:inkflow:sleepnews:')
-              guids.add(guid)
-              assert body==desc
-              assert len(BeautifulSoup(body,'lxml').get_text(' ',strip=True))>=800
-              assert '文章原址' not in body and '打开公众号原文' not in body
-          print('Private fulltext RSS validation: passed; articles:',len(items))
-          PY
-          rm -f "$RUNNER_TEMP/sleepnews-fulltext-private.xml"
-      # No artifact upload: copyrighted original article bodies and generated
-      # books stay only in temporary files, never public GitHub Pages.
+          python private_fulltext.py --sample "${{ inputs.sample || '2' }}" --strict
+          python fulltext_private.py --limit "${{ inputs.sample || '2' }}" --output "$RUNNER_TEMP/sleepnews-source-recheck.xml"
+          rm -f "$RUNNER_TEMP/sleepnews-source-recheck.xml"
+      # No EPUB/book/article artifacts uploaded.
