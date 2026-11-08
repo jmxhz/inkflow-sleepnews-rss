@@ -4,6 +4,16 @@ on:
   schedule:
     - cron: "23 12 * * *"
   workflow_dispatch:
+    inputs:
+      sample:
+        description: "How many currently indexed original articles to validate"
+        required: false
+        default: "2"
+        type: choice
+        options:
+          - "2"
+          - "5"
+          - "13"
 
 permissions:
   contents: read
@@ -32,6 +42,6 @@ jobs:
       - name: Fetch verified full articles and validate private EPUB
         env:
           PYTHONUTF8: "1"
-        run: python private_fulltext.py --sample 2 --strict
+        run: python private_fulltext.py --sample "${{ inputs.sample || '2' }}" --strict
       # No artifact upload: the copyrighted original article body and book
       # are held in a temporary directory, never public GitHub Pages.
