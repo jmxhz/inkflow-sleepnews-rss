@@ -21,6 +21,7 @@ import sys
 import xml.etree.ElementTree as ET
 
 from bs4 import BeautifulSoup
+import requests
 import sleepnews_history as hist
 
 ROOT=Path(__file__).resolve().parent
@@ -115,9 +116,21 @@ def refresh(days=30, max_attempts=3, dry_run=False, s=None):
     channel, items=entries(root)
     records=current_records(items)
     upgraded=remove_truncated_entries(channel)
-    candidates,stats=hist.fetch_backfill(
-        records,days=days,max_attempts=max_attempts,
-        progress_path=RETRY,s=s)
+    try:
+        candidates,stats=hist.fetch_backfill(
+            records,days=days,max_attempts=max_attempts,
+            progress_path=RETRY,s=s)
+    except requests.RequestException as exc:
+        if not records:
+            raise
+        # External archive may time out temporarily. Do not discard or
+        # republish incomplete articles; preserve already verified fulltext,
+        # and let the next scheduled run retry discovery.
+        candidates=[]
+        stats={"index":len(records),"attempted":0,"added":0,
+               "unresolved":0,"external_source_unavailable":True}
+        print("BACKFILL_DEGRADED: historical index temporarily unreachable; "
+              "keeping existing verified articles",file=sys.stderr)
     existing={(x["date"],hist.normalize(x["title"])) for x in records}
     count=0
     for candidate in candidates:
