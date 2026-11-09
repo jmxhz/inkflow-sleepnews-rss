@@ -37,7 +37,11 @@ jobs:
         env:
           PYTHONUTF8: "1"
         run: python hydrate_rss.py --feed feed.xml
-      - name: Validate RSS and commit full articles
+      - name: Build stable link-only-legacy-safe fulltext pages and image assets
+        env:
+          PYTHONUTF8: "1"
+        run: python build_stable_feed.py --source feed.xml --target feed-stable.xml
+      - name: Validate both feeds and commit full articles
         shell: bash
         run: |
           python - <<'PY'
@@ -82,8 +86,43 @@ jobs:
                       'Refusing to change a previously published article URL: '
                       'WhereMyLife treats URL changes as additional articles')
           print(f'Validated {len(items)} FULLTEXT entries; published article URLs immutable')
+          from pathlib import Path
+          from bs4 import BeautifulSoup
+          stable=ET.parse('feed-stable.xml').getroot()
+          assert stable.findtext('./channel/title')=='睡前消息编辑部 · 每日新闻（稳定全文）'
+          stable_items=stable.findall('./channel/item')
+          assert len(stable_items)==len(items)
+          stable_links={}
+          for source, item in zip(items,stable_items):
+              uid=item.findtext('guid','')
+              stable_link=item.findtext('link','')
+              assert uid==source.findtext('guid')
+              assert item.findtext('title')==source.findtext('title')
+              assert item.findtext('pubDate')==source.findtext('pubDate')
+              assert stable_link.startswith('https://jmxhz.github.io/inkflow-sleepnews-rss/stable/')
+              stable_links[uid]=stable_link
+              page=Path('stable')/stable_link.rsplit('/',1)[-1]
+              assert page.is_file() and page.stat().st_size>800
+              html=item.findtext('{http://purl.org/rss/1.0/modules/content/}encoded','')
+              assert html and html==item.findtext('description','')
+              assert len(BeautifulSoup(html,'lxml').get_text(' ',strip=True))>=800
+              assert not any(t in html for t in ('文章原址','打开公众号原文','按标题检索'))
+              for image in BeautifulSoup(html,'lxml').select('img'):
+                  url=image.get('src','')
+                  assert url.startswith('https://jmxhz.github.io/inkflow-sleepnews-rss/assets/')
+                  asset=Path('assets')/url.rsplit('/',1)[-1]
+                  assert asset.is_file() and asset.stat().st_size>600
+          # No future changes to any previously published stable page link.
+          if subprocess.run(['git','cat-file','-e','HEAD:feed-stable.xml'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode==0:
+              prior=ET.fromstring(subprocess.check_output(['git','show','HEAD:feed-stable.xml']))
+              for old_item in prior.findall('./channel/item'):
+                  uid=old_item.findtext('guid','')
+                  if uid in stable_links:
+                      assert stable_links[uid]==old_item.findtext('link'), (
+                          'Stable article link changed; refusing duplicate publication')
+          print(f'Validated {len(stable_items)} stable, complete articles and permanent HTML pages')
           PY
-          git add -- feed.xml
+          git add -- feed.xml feed-stable.xml build_stable_feed.py stable/ assets/
           if [ -f retry-state.json ]; then git add -- retry-state.json; fi
           if [ -f link-recovery-state.json ]; then git add -- link-recovery-state.json; fi
           if git diff --cached --quiet; then
