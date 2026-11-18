@@ -27,6 +27,16 @@ class QueueTests(unittest.TestCase):
             p = Path(d)/'pending.json'; q.save(p, state)
             self.assertEqual(q.load(p), state)
 
+    def test_two_recent_and_one_old_attempt_with_cooldown(self):
+        now = dt.datetime(2026,11,18,tzinfo=dt.timezone.utc)
+        state={'pending':{}}
+        items=[{'date':d,'title':d} for d in ('2026-10-20','2026-11-12','2026-11-16','2026-11-17')]
+        q.merge(state,items,[],str.casefold)
+        selected=q.select(state,now,3)
+        self.assertEqual([x['date'] for x in selected],['2026-11-17','2026-11-16','2026-10-20'])
+        for item in selected: q.attempted(state,item,now,str.casefold,'unresolved')
+        self.assertEqual([x['date'] for x in q.select(state,now,3)],['2026-11-12'])
+
     def test_full_feed_excludes_old_backlog_without_discarding(self):
         now = dt.datetime(2026, 11, 18, tzinfo=dt.timezone.utc)
         state = {'pending': {}}

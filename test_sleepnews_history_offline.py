@@ -38,6 +38,24 @@ class HistoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'完整原文结构'):
             h.validate_wechat_page(s,'https://mp.weixin.qq.com/s?x=1','x')
         self.assertEqual(len(s.calls),2)
+    def test_common_same_host_redirect_forms_are_followed_but_still_validated(self):
+        for location in ('//mp.weixin.qq.com/s?x=2', '/s?x=2', '?x=2', 's?x=2', 'https://mp.weixin.qq.com/s?x=2'):
+            with self.subTest(location=location):
+                s=Session([Response(status=302,headers={'Location':location}), Response(body=b'<html></html>')])
+                with self.assertRaisesRegex(ValueError, '完整原文结构'):
+                    h.validate_wechat_page(s,'https://mp.weixin.qq.com/s?x=1','x')
+                self.assertEqual(len(s.calls),2)
+
+    def test_untrusted_redirect_reports_only_categories(self):
+        s=Session([Response(status=302,headers={'Location':'http://mp.weixin.qq.com/s?secret=private'})])
+        with self.assertRaises(ValueError) as caught:
+            h.validate_wechat_page(s,'https://mp.weixin.qq.com/s?x=1','x')
+        message=str(caught.exception)
+        self.assertIn('scheme=http',message)
+        self.assertIn('host=wechat',message)
+        self.assertNotIn('secret',message)
+        self.assertEqual(len(s.calls),1)
+
     def test_oversize_distinct(self):
         with self.assertRaisesRegex(ValueError,'大小上限'):
             h.validate_wechat_page(Session([Response(body=b'x'*6000001)]),'https://mp.weixin.qq.com/s?x=1','x')

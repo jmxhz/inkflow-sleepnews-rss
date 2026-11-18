@@ -161,7 +161,17 @@ def validate_wechat_page(s, link,expected):
             location=r.headers.get("Location")
             target=urljoin(link,location) if location else ""
             if not is_wechat_url(target):
-                raise ValueError("微信原文重定向目标不受信任或缺失")
+                # Diagnostics deliberately exclude raw locations and queries.
+                try:
+                    parsed=urlsplit(target)
+                    scheme=parsed.scheme if parsed.scheme in ("http","https") else "other"
+                    host="wechat" if parsed.hostname=="mp.weixin.qq.com" else "other"
+                    path="article" if parsed.path=="/s" or parsed.path.startswith("/s/") else "other"
+                    form=("missing" if not location else "protocol-relative" if location.startswith("//")
+                          else "absolute" if urlsplit(location).scheme else "relative")
+                except ValueError:
+                    scheme=host=path=form="invalid"
+                raise ValueError(f"微信原文重定向目标不受信任或缺失 status={r.status_code} form={form} scheme={scheme} host={host} path={path}")
             link=target
             continue
         if r.status_code!=200:

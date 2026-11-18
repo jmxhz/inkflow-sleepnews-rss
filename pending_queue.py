@@ -67,13 +67,14 @@ def select(state, now, limit, cooldown=dt.timedelta(hours=12), newer_than=None):
             except (TypeError, ValueError):
                 pass
         eligible.append((item.get('last_attempt') or '', item['date'], k))
-    # Reserve one slot for the newest eligible candidate; remaining slots
-    # rotate least-recently-tried backlog. Total requests remain bounded.
+    # Reserve up to two slots for the newest eligible articles and at least
+    # one for oldest-attempted backlog when three slots are available.
     if not eligible or limit <= 0:
         return []
-    newest = max(eligible, key=lambda row: (row[1], row[2]))
-    rest = sorted(row for row in eligible if row != newest)
-    return [state['pending'][row[2]] for row in [newest] + rest[:limit-1]]
+    recent_count = min(2, limit if limit < 3 else limit - 1)
+    recent = sorted(eligible, key=lambda row: (row[1], row[2]), reverse=True)[:recent_count]
+    rest = sorted(row for row in eligible if row not in recent)
+    return [state['pending'][row[2]] for row in recent + rest[:limit-len(recent)]]
 
 
 def attempted(state, item, now, normalize, outcome):
