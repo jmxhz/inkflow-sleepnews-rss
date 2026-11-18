@@ -57,6 +57,7 @@ def index_titles(s, days=30, today=None, max_pages=3):
         response.raise_for_status()
         soup=BeautifulSoup(response.content,"lxml")
         count=0
+        page_dates=[]
         for block in soup.select(".cell.item"):
             title_el=block.select_one(".item_title .hide-content")
             publisher=block.select_one("a.node")
@@ -66,10 +67,19 @@ def index_titles(s, days=30, today=None, max_pages=3):
             try: d=date_in_title(title)
             except ValueError:continue
             count+=1
+            page_dates.append(d)
             if earliest<=d<=today+timedelta(days=1):
-                candidates[d.isoformat()]={"date":d.isoformat(),"title":title}
+                candidate={"date":d.isoformat(),"title":title}
+                # Only a direct official WeChat URL is a candidate, never a
+                # third-party article, subscription page, or fabricated link.
+                for anchor in block.select("a[href]"):
+                    href=urljoin(INDEX,anchor["href"])
+                    if is_wechat_url(href):
+                        candidate["wechat_url"]=href
+                        break
+                candidates[d.isoformat()]=candidate
         if not count:break
-        if all(date_in_title(x["title"])<earliest for x in list(candidates.values())[-3:]):
+        if page_dates and all(d<earliest for d in page_dates):
             break
     return sorted(candidates.values(),key=lambda x:x["date"],reverse=True)
 
@@ -125,14 +135,43 @@ def sogou_to_tencent(s, href):
 def stable_lookup(title):
     return SOGOU+"?"+urlencode({"type":"2","query":ACCOUNT+" "+title})
 
-def validate_wechat_page(s, link,expected):
+def is_wechat_url(link):
     u=urlsplit(link)
-    if (u.scheme!="https" or u.hostname!="mp.weixin.qq.com" or
-            (u.path!="/s" and not re.fullmatch(r"/s/[A-Za-z0-9_-]{14,100}",u.path))):
+    try:
+        return (len(link)<=750 and u.scheme=="https" and
+                u.hostname=="mp.weixin.qq.com" and u.port in (None,443) and
+                not u.username and not u.password and
+                (u.path=="/s" or bool(re.fullmatch(r"/s/[A-Za-z0-9_-]{14,100}",u.path))))
+    except ValueError:
+        return False
+
+
+def validate_wechat_page(s, link,expected):
+    if not is_wechat_url(link):
         raise ValueError("原文网址不属于微信")
-    r=s.get(link,timeout=(8,23),allow_redirects=False)
-    if r.status_code!=200 or len(r.content)>6_000_000:
-        raise ValueError("微信原文无法完整加载")
+    # Follow only a small number of explicit same-host article redirects.
+    # Never follow to a login/challenge host or leak the URL in an error.
+    seen=set()
+    for _ in range(4):
+        if link in seen:
+            raise ValueError("微信原文重定向循环")
+        seen.add(link)
+        r=s.get(link,timeout=(8,23),allow_redirects=False)
+        if r.status_code in (301,302,303,307,308):
+            location=r.headers.get("Location")
+            target=urljoin(link,location) if location else ""
+            if not is_wechat_url(target):
+                raise ValueError("微信原文重定向目标不受信任或缺失")
+            link=target
+            continue
+        if r.status_code!=200:
+            raise ValueError(f"微信原文 HTTP 状态 {r.status_code}")
+        if len(r.content)>6_000_000:
+            raise ValueError("微信原文响应超过大小上限")
+        break
+    else:
+        raise ValueError("微信原文重定向次数超过上限")
+    u=urlsplit(link)
     soup=BeautifulSoup(r.content,"lxml")
     title_el=soup.select_one("#activity-name")
     publisher=soup.select_one("#js_name")
@@ -178,7 +217,7 @@ def progress_save(obj):
     temp.replace(PROGRESS)
 
 def fetch_backfill(existing,days=30,max_attempts=5,pause=1.3,progress_path=None,now=None,
-                   s=None):
+                   s=None, queue_path=None):
     """Returns (new_verified_entries, stats). At most max_attempts network lookups.
 
     Full 30-day backfill accumulates over scheduled runs. Failed matches are
@@ -192,39 +231,58 @@ def fetch_backfill(existing,days=30,max_attempts=5,pause=1.3,progress_path=None,
         json.loads(Path(progress_path).read_text(encoding="utf-8"))
         if Path(progress_path).exists() else {})
     attempts=state.get("attempts") or {}
-    candidates=index_titles(s,days=days)
+    import pending_queue
+    queue_path=Path(queue_path) if queue_path else ROOT/"pending-state.json"
+    queue=pending_queue.load(queue_path)
+    try:
+        discovered=index_titles(s,days=days)
+        degraded=False
+    except requests.RequestException:
+        discovered=[]
+        degraded=True
+    pending_queue.merge(queue,discovered,existing,normalize)
+    pending_queue.save(queue_path,queue)
+    cutoff=min((x["date"] for x in existing),default=None) if len(existing)>=90 else None
+    candidates=pending_queue.select(queue,now,max_attempts,newer_than=cutoff)
+    outside_window=sum(1 for item in queue["pending"].values()
+                       if cutoff is not None and item["date"]<=cutoff)
     new=[]
-    stats={"index":len(candidates),"attempted":0,"added":0,"unresolved":0,
-           "temporary_links":0,"skipped_retry":0}
+    stats={"index":len(discovered),"attempted":0,"added":0,"unresolved":0,
+           "temporary_links":0,"skipped_retry":0,"external_source_unavailable":degraded,
+           "pending":len(queue["pending"]),"outside_window":outside_window}
     for candidate in candidates:
         if stats["attempted"]>=max_attempts:break
         key=candidate["date"]+"|"+normalize(candidate["title"])
         if (candidate["date"],normalize(candidate["title"])) in current_dates:
             continue
-        tried=attempts.get(key) or {}
-        if tried.get("at"):
-            try:
-                prev=datetime.fromisoformat(tried["at"])
-                if now-prev<timedelta(hours=12):
-                    stats["skipped_retry"]+=1
-                    continue
-            except (ValueError,TypeError):pass
         stats["attempted"]+=1
         try:
-            href=search_candidates(s,candidate["title"])
-            if not href:
-                raise ValueError("搜狗未找到该公众号的匹配文章")
-            link=sogou_to_tencent(s,href)
-            verified=validate_wechat_page(s,link,candidate["title"])
+            direct=candidate.get("wechat_url")
+            if direct:
+                try:
+                    verified=validate_wechat_page(s,direct,candidate["title"])
+                except (requests.RequestException,ValueError):
+                    # An unusable index link is not trusted; try ordinary
+                    # public search without bypassing any access controls.
+                    direct=None
+            if not direct:
+                href=search_candidates(s,candidate["title"])
+                if not href:
+                    raise ValueError("搜狗未找到该公众号的匹配文章")
+                link=sogou_to_tencent(s,href)
+                verified=validate_wechat_page(s,link,candidate["title"])
             new.append(verified)
             current_dates.add((verified["date"],normalize(verified["title"])))
             stats["added"]+=1
             if verified["linkKind"]=="temporary_tencent":
                 stats["temporary_links"]+=1
             attempts.pop(key,None)
+            pending_queue.attempted(queue,candidate,now,normalize,"verified; awaiting publication")
         except (requests.RequestException,ValueError) as e:
             stats["unresolved"]+=1
             attempts[key]={"at":now.isoformat(),"reason":str(e)[:110]}
+            pending_queue.attempted(queue,candidate,now,normalize,str(e))
+        pending_queue.save(queue_path,queue)
         if progress_path is None:
             state["attempts"]=attempts
             state["last_scan"]=now.isoformat()

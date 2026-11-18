@@ -27,6 +27,7 @@ import sleepnews_history as hist
 ROOT=Path(__file__).resolve().parent
 FEED=ROOT/"feed.xml"
 RETRY=ROOT/"retry-state.json"
+PENDING=ROOT/"pending-state.json"
 ACCOUNT="睡前消息编辑部"
 ID="MP_WXS_3581557283"
 CONTENT="http://purl.org/rss/1.0/modules/content/"
@@ -119,7 +120,7 @@ def refresh(days=30, max_attempts=3, dry_run=False, s=None):
     try:
         candidates,stats=hist.fetch_backfill(
             records,days=days,max_attempts=max_attempts,
-            progress_path=RETRY,s=s)
+            progress_path=RETRY,queue_path=PENDING,s=s)
     except requests.RequestException as exc:
         if not records:
             raise
@@ -156,8 +157,8 @@ def refresh(days=30, max_attempts=3, dry_run=False, s=None):
             "no_private_account_credentials":True,
             "upload_expected":count>0 or upgraded>0 or RETRY.is_file()}
     print(json.dumps(result,ensure_ascii=False))
-    if not stats["index"]:
-        raise RuntimeError("Historical index returned no publisher articles; cloud refresh needs checking")
+    if not stats["index"] or stats.get("external_source_unavailable"):
+        print("::warning::Historical index unavailable or empty; pending queue retained", file=sys.stderr)
     return result
 
 if __name__=="__main__":

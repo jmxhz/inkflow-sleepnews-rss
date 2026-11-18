@@ -22,6 +22,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: true
+          ref: main
       - name: Install Python
         uses: actions/setup-python@v5
         with:
@@ -29,6 +30,8 @@ jobs:
           cache: pip
       - name: Install public scraper dependencies
         run: pip install -r requirements.txt
+      - name: Run offline regression tests
+        run: python -m unittest test_sleepnews_history_offline test_pending_queue -v
       - name: Refresh latest plus last 30 days
         env:
           PYTHONUTF8: "1"
@@ -79,7 +82,18 @@ jobs:
           import subprocess
           original=subprocess.check_output(['git','show','HEAD:feed.xml'])
           oldroot=ET.fromstring(original)
-          for old in oldroot.findall('./channel/item'):
+          # Keep every previously published item that remains in the newest
+          # 90 of the union. Only normal rolling-window eviction is allowed.
+          from sleepnews_history import date_in_title
+          olditems=oldroot.findall('./channel/item')
+          union={item.findtext('guid',''): item for item in olditems}
+          union.update({item.findtext('guid',''): item for item in items})
+          retained=sorted(union.values(), key=lambda item:(
+              date_in_title(item.findtext('title','')).isoformat(),
+              item.findtext('guid','')), reverse=True)[:90]
+          required={item.findtext('guid','') for item in retained}
+          assert required.issubset(guids), 'Published entries lost within retention window'
+          for old in olditems:
               uid=old.findtext('guid','')
               if uid in links:
                   assert links[uid]==old.findtext('link',''), (
@@ -133,3 +147,23 @@ jobs:
                 commit -m "Auto refresh verified SleepNews fulltext RSS"
             git push origin HEAD:main
           fi
+
+      - name: Persist discovery and retry state even if publication fails
+        if: always()
+        shell: bash
+        run: |
+          git reset
+          for file in pending-state.json retry-state.json link-recovery-state.json; do
+            if [ -f "$file" ]; then git add -- "$file"; fi
+          done
+          if ! git diff --cached --quiet; then
+            git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Persist RSS discovery state"
+            git push origin HEAD:main
+          fi
+      - name: Alert on stale publication
+        if: always()
+        shell: bash
+        run: |
+          git fetch origin main
+          git show FETCH_HEAD:feed.xml > "$RUNNER_TEMP/published-feed.xml"
+          python check_freshness.py "$RUNNER_TEMP/published-feed.xml"
