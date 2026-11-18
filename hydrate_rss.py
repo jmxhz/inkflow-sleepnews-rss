@@ -19,7 +19,7 @@ import requests
 
 from fulltext_private import sanitize_wechat_content
 from private_fulltext import fetch_original, UA
-from sleepnews_history import ACCOUNT, ACCOUNT_ID, normalize
+from sleepnews_history import ACCOUNT, ACCOUNT_ID, normalize, is_wechat_url
 
 ROOT=Path(__file__).resolve().parent
 FEED=ROOT/"feed.xml"
@@ -67,11 +67,9 @@ def hydrate(path=FEED, session=None, fetch=fetch_original, minimum=800):
         guid=node.findtext("guid","")
         title=node.findtext("title","")
         link=node.findtext("link","")
-        parsed=urlsplit(link)
         if not guid.startswith(GUID_PREFIX):
             raise ValueError("Unexpected article GUID")
-        if parsed.scheme!="https" or parsed.hostname!="mp.weixin.qq.com" or (
-            parsed.path!="/s" and not parsed.path.startswith("/s/")):
+        if not is_wechat_url(link):
             raise ValueError("Unexpected article original URL")
         key=normalize(title)
         if guid in seen_ids or key in seen_titles:

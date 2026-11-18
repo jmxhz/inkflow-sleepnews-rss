@@ -31,7 +31,7 @@ jobs:
       - name: Install public scraper dependencies
         run: pip install -r requirements.txt
       - name: Run offline regression tests
-        run: python -m unittest test_sleepnews_history_offline test_pending_queue -v
+        run: python -m unittest test_sleepnews_history_offline test_pending_queue test_shortlink_offline test_search_query_offline -v
       - name: Refresh latest plus last 30 days
         env:
           PYTHONUTF8: "1"
@@ -86,6 +86,13 @@ jobs:
           # 90 of the union. Only normal rolling-window eviction is allowed.
           from sleepnews_history import date_in_title
           olditems=oldroot.findall('./channel/item')
+          oldids={item.findtext('guid','') for item in olditems}
+          from sleepnews_history import is_wechat_url, canonical_article_url
+          for item in items:
+              link=item.findtext('link','')
+              assert is_wechat_url(link), 'Invalid WeChat article URL'
+              if item.findtext('guid','') not in oldids:
+                  assert canonical_article_url(link)==link, 'New link contains session parameters'
           union={item.findtext('guid',''): item for item in olditems}
           union.update({item.findtext('guid',''): item for item in items})
           retained=sorted(union.values(), key=lambda item:(

@@ -46,9 +46,12 @@ def merge(state, discovered, existing, normalize):
             if k not in pending:
                 pending[k] = {'date': item['date'], 'title': item['title'], 'attempts': 0}
             url = item.get('wechat_url', '')
-            parsed = urlsplit(url)
-            if parsed.scheme == 'https' and parsed.hostname == 'mp.weixin.qq.com' and (parsed.path == '/s' or parsed.path.startswith('/s/')):
-                pending[k]['wechat_url'] = url
+            if url:
+                from sleepnews_history import canonical_article_url
+                try:
+                    pending[k]['wechat_url'] = canonical_article_url(url)
+                except ValueError:
+                    pass
 
 
 def select(state, now, limit, cooldown=dt.timedelta(hours=12), newer_than=None):

@@ -23,6 +23,7 @@ import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 import requests
 import sleepnews_history as hist
+from fulltext_private import sanitize_wechat_content
 
 ROOT=Path(__file__).resolve().parent
 FEED=ROOT/"feed.xml"
@@ -69,9 +70,8 @@ def append_verified(channel,item):
     if day.isoformat()!=item.get("date"):
         raise ValueError("Title and date differ")
     original=str(item["url"])
-    u=hist.urlsplit(original)
-    if u.scheme!="https" or u.hostname!="mp.weixin.qq.com" or u.path!="/s":
-        raise ValueError("Only original WeChat URLs may be published")
+    if not hist.is_wechat_url(original) or hist.canonical_article_url(original)!=original:
+        raise ValueError("Only sanitized original WeChat URLs may be published")
     summary=str(item["summary"])[:240]
     if len(summary)<70:
         raise ValueError("Not enough verified text for RSS")
@@ -82,8 +82,18 @@ def append_verified(channel,item):
     ET.SubElement(node,"pubDate").text=dt.datetime.combine(
         day,dt.time(12,0),tzinfo=CST).strftime("%a, %d %b %Y %H:%M:%S %z")
     ET.SubElement(node,"{"+DC+"}creator").text=ACCOUNT
-    # The mandatory hydration step adds full content:encoded + description.
-    # Never write a misleading 240-character excerpt into these fields.
+    # Reuse the exact page already identity-verified when it passes the same
+    # complete-text checks as hydration; otherwise hydration remains mandatory.
+    raw=item.get("verified_html")
+    if raw:
+        source=BeautifulSoup(raw,"lxml").get_text(" ",strip=True)
+        body,readable=sanitize_wechat_content(raw)
+        if (len(readable)>=800 and len(readable)>=int(len(source)*.96) and
+            not any(x in body for x in ("文章原址","打开公众号原文","按标题检索"))):
+            from hydrate_rss import strip_invalid_xml_characters
+            body=strip_invalid_xml_characters(body)
+            ET.SubElement(node,"{"+CONTENT+"}encoded").text=body
+            ET.SubElement(node,"description").text=body
 
 def remove_truncated_entries(channel):
     """Remove only invalid or truncated body fields, retain verified fulltext.

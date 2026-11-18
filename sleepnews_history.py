@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlencode, urljoin, urlsplit, parse_qs, quote
+from urllib.parse import urlencode, urljoin, urlsplit, parse_qs, parse_qsl, quote, urlunsplit
 import hashlib
 import html
 import json
@@ -89,7 +89,9 @@ def search_candidates(s,title):
     tokens=re.findall(r"[A-Za-z0-9]+|[\u3400-\u9fff]+",tail)
     words=" ".join(tokens[:5])[:65]
     short=" ".join(tokens[:2])[:38]
-    queries=[ACCOUNT+" "+short,ACCOUNT+" "+words,
+    # Search by the public daily title prefix first. Keep at most two
+    # keyword fallbacks so the worst-case request count remains three.
+    queries=["睡前消息【"+datepart+"】", ACCOUNT+" "+short,
              ACCOUNT+" "+datepart+" "+words[:25]]
     queries=list(dict.fromkeys(queries))
     for query in queries:
@@ -144,6 +146,18 @@ def is_wechat_url(link):
                 (u.path=="/s" or bool(re.fullmatch(r"/s/[A-Za-z0-9_-]{14,100}",u.path))))
     except ValueError:
         return False
+
+
+def canonical_article_url(link):
+    """Keep only public article identity, never session/tracking parameters."""
+    if not is_wechat_url(link):
+        raise ValueError("原文网址不属于微信")
+    u=urlsplit(link)
+    if u.path.startswith('/s/'):
+        return urlunsplit(('https','mp.weixin.qq.com',u.path,'',''))
+    allowed={'__biz','mid','idx','sn','chksm'}
+    pairs=[(k,v) for k,v in parse_qsl(u.query,keep_blank_values=True) if k in allowed]
+    return urlunsplit(('https','mp.weixin.qq.com','/s',urlencode(pairs),''))
 
 
 def validate_wechat_page(s, link,expected):
@@ -207,7 +221,8 @@ def validate_wechat_page(s, link,expected):
     return {
         "reviewId":f"{ACCOUNT_ID}_mid{mid.group(1)}_idx{idx.group(1)}",
         "name":ACCOUNT,"title":title,"date":datepart,
-        "url":link,"summary":body[:240],
+        "url":canonical_article_url(link),"summary":body[:240],
+        "verified_html":str(body_el),
         "historySource":"sogou_verified",
         "linkKind":source_kind,
         "lookupUrl":stable_lookup(title),
@@ -250,6 +265,11 @@ def fetch_backfill(existing,days=30,max_attempts=5,pause=1.3,progress_path=None,
     except requests.RequestException:
         discovered=[]
         degraded=True
+    # Signed source URLs may be needed for this run's first request. Keep
+    # them only in memory; the durable queue stores sanitized identities.
+    ephemeral_urls={pending_queue.key(item,normalize): item.get("wechat_url")
+                    for item in discovered if item.get("wechat_url") and
+                    is_wechat_url(item["wechat_url"])}
     pending_queue.merge(queue,discovered,existing,normalize)
     pending_queue.save(queue_path,queue)
     cutoff=min((x["date"] for x in existing),default=None) if len(existing)>=90 else None
@@ -267,7 +287,7 @@ def fetch_backfill(existing,days=30,max_attempts=5,pause=1.3,progress_path=None,
             continue
         stats["attempted"]+=1
         try:
-            direct=candidate.get("wechat_url")
+            direct=ephemeral_urls.get(key) or candidate.get("wechat_url")
             if direct:
                 try:
                     verified=validate_wechat_page(s,direct,candidate["title"])
@@ -290,8 +310,10 @@ def fetch_backfill(existing,days=30,max_attempts=5,pause=1.3,progress_path=None,
             pending_queue.attempted(queue,candidate,now,normalize,"verified; awaiting publication")
         except (requests.RequestException,ValueError) as e:
             stats["unresolved"]+=1
-            attempts[key]={"at":now.isoformat(),"reason":str(e)[:110]}
-            pending_queue.attempted(queue,candidate,now,normalize,str(e))
+            # Requests exceptions can contain the signed URL; never persist it.
+            reason="network request failed" if isinstance(e,requests.RequestException) else str(e)
+            attempts[key]={"at":now.isoformat(),"reason":reason[:110]}
+            pending_queue.attempted(queue,candidate,now,normalize,reason)
         pending_queue.save(queue_path,queue)
         if progress_path is None:
             state["attempts"]=attempts
